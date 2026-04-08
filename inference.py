@@ -1,14 +1,21 @@
 import asyncio
 import os
 import re
+import sys
 import textwrap
 from typing import List, Optional, Tuple
 
 from openai import OpenAI
 
-from notify_env.client import NotificationEnv
-from notify_env.models import NotificationAction
-from notify_env.server.scenarios import VALID_TASKS
+try:
+    from notify_env.client import NotificationEnv
+    from notify_env.models import NotificationAction
+    from notify_env.server.scenarios import VALID_TASKS
+except ModuleNotFoundError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    from notify_env.client import NotificationEnv
+    from notify_env.models import NotificationAction
+    from notify_env.server.scenarios import VALID_TASKS
 
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
