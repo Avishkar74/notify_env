@@ -17,16 +17,17 @@ except ModuleNotFoundError:
     from notify_env.models import NotificationAction
     from notify_env.server.scenarios import VALID_TASKS
 
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
-ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
-# Prefer validator-provided API_KEY so calls are routed via LiteLLM proxy.
-API_KEY = (
-    os.getenv("API_KEY")
-    or os.getenv("HF_TOKEN")
-    or os.getenv("OPENAI_API_KEY")
-)
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+IMAGE_NAME = os.getenv("IMAGE_NAME")
+# Prefer validator-injected vars when available; fall back to common names for local testing
+try:
+    API_BASE_URL = os.environ["API_BASE_URL"]
+    API_KEY = os.environ["API_KEY"]
+except KeyError:
+    API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+    API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
+
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
 BENCHMARK = "notify_env"
 
 SINGLE_TASK = os.getenv("NOTIF_TASK")
