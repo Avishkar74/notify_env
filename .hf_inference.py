@@ -183,20 +183,6 @@ def get_llm_action(client: OpenAI, obs, history: List[str]) -> Tuple[str, Option
         return _heuristic_fallback(obs), str(exc)[:100]
 
 
-def warmup_proxy_call(client: OpenAI) -> None:
-    """Make one minimal call so validator can observe proxy traffic even if env fails early."""
-    try:
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "ping"}],
-            temperature=0.0,
-            max_tokens=1,
-            stream=False,
-        )
-    except Exception as exc:
-        debug_log(f"[DEBUG] warmup_call_error={exc}")
-
-
 async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float, List[float]]:
     rewards: List[float] = []
     history: List[str] = []
@@ -264,8 +250,6 @@ async def main() -> None:
     except Exception as exc:
         debug_log(f"[DEBUG] client_init_error={exc}")
         raise
-
-    warmup_proxy_call(client)
 
     tasks_to_run = [SINGLE_TASK] if SINGLE_TASK in VALID_TASKS else VALID_TASKS
 
