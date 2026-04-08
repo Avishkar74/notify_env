@@ -10,13 +10,12 @@ from notify_env.client import NotificationEnv
 from notify_env.models import NotificationAction
 from notify_env.server.scenarios import VALID_TASKS
 
-IMAGE_NAME = os.getenv("IMAGE_NAME")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
-API_KEY = (
-    os.getenv("OPENAI_API_KEY")
-    or os.getenv("HF_TOKEN")
+HF_TOKEN = (
+    os.getenv("HF_TOKEN")
+    or os.getenv("OPENAI_API_KEY")
     or os.getenv("API_KEY")
-    or "no-key"
 )
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
@@ -218,12 +217,12 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
 
 
 async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     tasks_to_run = [SINGLE_TASK] if SINGLE_TASK in VALID_TASKS else VALID_TASKS
 
     for task in tasks_to_run:
-        if IMAGE_NAME:
-            env = await NotificationEnv.from_docker_image(IMAGE_NAME)
+        if LOCAL_IMAGE_NAME:
+            env = await NotificationEnv.from_docker_image(LOCAL_IMAGE_NAME)
         else:
             env = NotificationEnv(base_url=ENV_URL)
 
