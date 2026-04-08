@@ -1,25 +1,27 @@
 import asyncio
+import json
 import os
 import re
+import sys
 import textwrap
+import urllib.request
 from typing import List, Optional, Tuple
 
-from openai import OpenAI
+try:
+    from notify_env.client import NotificationEnv
+    from notify_env.models import NotificationAction
+    from notify_env.server.scenarios import VALID_TASKS
+except ModuleNotFoundError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    from notify_env.client import NotificationEnv
+    from notify_env.models import NotificationAction
+    from notify_env.server.scenarios import VALID_TASKS
 
-from notify_env.client import NotificationEnv
-from notify_env.models import NotificationAction
-from notify_env.server.scenarios import VALID_TASKS
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
 IMAGE_NAME = os.getenv("IMAGE_NAME")
 ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
-API_KEY = (
-    os.getenv("OPENAI_API_KEY")
-    or os.getenv("HF_TOKEN")
-    or os.getenv("API_KEY")
-    or "no-key"
-)
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 BENCHMARK = "notify_env"
 
 SINGLE_TASK = os.getenv("NOTIF_TASK")
@@ -106,7 +108,7 @@ What is your decision?
 
 
 def parse_action(raw: str) -> str:
-    raw = raw.strip().lower()
+    raw = (raw or "").strip().lower()
     valid = ["notify_now", "silent", "delay", "escalate"]
 
     if raw in valid:
@@ -151,38 +153,50 @@ def _heuristic_fallback(obs) -> str:
     return "delay"
 
 
-def get_llm_action(client: OpenAI, obs, history: List[str]) -> Tuple[str, Optional[str]]:
+def get_ollama_action(obs, history: List[str]) -> Tuple[str, Optional[str]]:
     user_prompt = build_user_prompt(obs)
 
     if history:
         history_block = "\n".join(f"  Step {i + 1}: {h}" for i, h in enumerate(history[-3:]))
         user_prompt = f"RECENT DECISIONS:\n{history_block}\n\n{user_prompt}"
 
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": TEMPERATURE,
+            "num_predict": MAX_TOKENS,
+        },
+    }
+
     try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            stream=False,
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/chat",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        raw_text = (completion.choices[0].message.content or "").strip()
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        raw_text = ((result.get("message") or {}).get("content") or "").strip()
         return parse_action(raw_text), None
     except Exception as exc:
         return _heuristic_fallback(obs), str(exc)[:100]
 
 
-async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float, List[float]]:
+async def run_episode(env, task: str) -> Tuple[bool, int, float, List[float]]:
     rewards: List[float] = []
     history: List[str] = []
     steps_taken = 0
     score = 0.0
     success = False
 
-    log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task, env=BENCHMARK, model=OLLAMA_MODEL)
 
     try:
         result = await env.reset(task=task)
@@ -192,7 +206,7 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
             if result.done:
                 break
 
-            action_str, error = get_llm_action(client, obs, history)
+            action_str, error = get_ollama_action(obs, history)
             result = await env.step(NotificationAction(decision=action_str))
 
             reward = result.reward if result.reward is not None else 0.0
@@ -218,7 +232,6 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
 
 
 async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     tasks_to_run = [SINGLE_TASK] if SINGLE_TASK in VALID_TASKS else VALID_TASKS
 
     for task in tasks_to_run:
@@ -228,7 +241,7 @@ async def main() -> None:
             env = NotificationEnv(base_url=ENV_URL)
 
         try:
-            success, steps, score, rewards = await run_episode(client, env, task)
+            success, steps, score, rewards = await run_episode(env, task)
         finally:
             try:
                 await env.close()

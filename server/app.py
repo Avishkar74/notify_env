@@ -36,9 +36,11 @@ except Exception as e:  # pragma: no cover
     ) from e
 
 try:
-    from ..models import NotifyAction, NotifyObservation
-    from .notify_env_environment import NotifyEnvironment
+    # Prefer absolute package imports so container/runtime module resolution is stable.
+    from notify_env.models import NotifyAction, NotifyObservation
+    from notify_env.server.notify_env_environment import NotifyEnvironment
 except ModuleNotFoundError:
+    # Local fallback when running from within the package directory.
     from models import NotifyAction, NotifyObservation
     from server.notify_env_environment import NotifyEnvironment
 
