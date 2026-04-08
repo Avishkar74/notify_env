@@ -17,14 +17,9 @@ except ModuleNotFoundError:
     from notify_env.models import NotificationAction
     from notify_env.server.scenarios import VALID_TASKS
 
-IMAGE_NAME = os.getenv("IMAGE_NAME")
-# Prefer validator-injected vars when available; fall back to common names for local testing
-try:
-    API_BASE_URL = os.environ["API_BASE_URL"]
-    API_KEY = os.environ["API_KEY"]
-except KeyError:
-    API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-    API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY = os.getenv("API_KEY")
 
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
@@ -57,6 +52,11 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
         f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
+
+
+def debug_log(message: str) -> None:
+    # Keep validator parsing stable: debug goes to stderr, structured blocks go to stdout.
+    print(message, file=sys.stderr, flush=True)
 
 
 SYSTEM_PROMPT = textwrap.dedent(
@@ -159,10 +159,7 @@ def _heuristic_fallback(obs) -> str:
     return "delay"
 
 
-def get_llm_action(client: Optional[OpenAI], obs, history: List[str]) -> Tuple[str, Optional[str]]:
-    if client is None:
-        return _heuristic_fallback(obs), "client_unavailable"
-
+def get_llm_action(client: OpenAI, obs, history: List[str]) -> Tuple[str, Optional[str]]:
     user_prompt = build_user_prompt(obs)
 
     if history:
@@ -186,7 +183,7 @@ def get_llm_action(client: Optional[OpenAI], obs, history: List[str]) -> Tuple[s
         return _heuristic_fallback(obs), str(exc)[:100]
 
 
-async def run_episode(client: Optional[OpenAI], env, task: str) -> Tuple[bool, int, float, List[float]]:
+async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float, List[float]]:
     rewards: List[float] = []
     history: List[str] = []
     steps_taken = 0
@@ -214,7 +211,7 @@ async def run_episode(client: Optional[OpenAI], env, task: str) -> Tuple[bool, i
             log_step(step=step, action=action_str, reward=reward, done=done, error=error)
 
             if llm_error:
-                print(f"[DEBUG] model_error={llm_error}", flush=True)
+                debug_log(f"[DEBUG] model_error={llm_error}")
 
             history.append(f"{action_str} -> reward {reward:.2f} | {obs.feedback[:60]}")
             if done:
@@ -224,7 +221,7 @@ async def run_episode(client: Optional[OpenAI], env, task: str) -> Tuple[bool, i
         score = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
     except Exception as exc:
-        print(f"[DEBUG] Episode error for task={task}: {exc}", flush=True)
+        debug_log(f"[DEBUG] episode_error task={task}: {exc}")
         if steps_taken == 0:
             log_step(
                 step=1,
@@ -238,13 +235,21 @@ async def run_episode(client: Optional[OpenAI], env, task: str) -> Tuple[bool, i
 
 
 async def main() -> None:
-    client: Optional[OpenAI] = None
-    client_init_error: Optional[str] = None
+    client: OpenAI
     try:
+        # Validator requires explicit use of injected proxy vars.
+        client = OpenAI(
+            base_url=os.environ["API_BASE_URL"],
+            api_key=os.environ["API_KEY"],
+        )
+    except KeyError:
+        # Local fallback for manual testing outside validator.
+        if not API_KEY:
+            raise RuntimeError("Missing API_KEY for OpenAI client initialization")
         client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     except Exception as exc:
-        client_init_error = str(exc)
-        print(f"[DEBUG] client_init_error={exc}", flush=True)
+        debug_log(f"[DEBUG] client_init_error={exc}")
+        raise
 
     tasks_to_run = [SINGLE_TASK] if SINGLE_TASK in VALID_TASKS else VALID_TASKS
 
@@ -257,34 +262,29 @@ async def main() -> None:
         log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
 
         try:
-            if client is None:
-                err_msg = client_init_error or "missing_api_key"
-                log_step(step=1, action="delay", reward=0.0, done=True, error=err_msg)
-                continue
-
-            if IMAGE_NAME:
-                env = await NotificationEnv.from_docker_image(IMAGE_NAME)
+            if LOCAL_IMAGE_NAME:
+                env = await NotificationEnv.from_docker_image(LOCAL_IMAGE_NAME)
             else:
                 env = NotificationEnv(base_url=ENV_URL)
 
             success, steps, score, rewards = await run_episode(client, env, task)
         except Exception as exc:
-            print(f"[DEBUG] main_task_error task={task}: {exc}", flush=True)
+            debug_log(f"[DEBUG] main_task_error task={task}: {exc}")
         finally:
             try:
                 if env is not None:
                     await env.close()
             except Exception as err:
-                print(f"[DEBUG] env.close() error: {err}", flush=True)
+                debug_log(f"[DEBUG] env.close_error={err}")
             log_end(success=success, steps=steps, score=score, rewards=rewards)
 
-        print(f"[DEBUG] Task={task} | Score={score:.3f} | Success={success}", flush=True)
+        debug_log(f"[DEBUG] task={task} score={score:.3f} success={success}")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as exc:
-        print(f"[DEBUG] fatal_error={exc}", flush=True)
+        debug_log(f"[DEBUG] fatal_error={exc}")
         print("[END] success=false steps=0 score=0.000 rewards=", flush=True)
         sys.exit(1)
