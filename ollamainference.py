@@ -20,7 +20,7 @@ except ModuleNotFoundError:
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
-IMAGE_NAME = os.getenv("IMAGE_NAME")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
 BENCHMARK = "notify_env"
 
@@ -206,16 +206,20 @@ async def run_episode(env, task: str) -> Tuple[bool, int, float, List[float]]:
             if result.done:
                 break
 
-            action_str, error = get_ollama_action(obs, history)
+            action_str, model_error = get_ollama_action(obs, history)
             result = await env.step(NotificationAction(decision=action_str))
 
             reward = result.reward if result.reward is not None else 0.0
             done = result.done
             obs = result.observation
+            error = getattr(obs, "last_action_error", None)
 
             rewards.append(reward)
             steps_taken = step
             log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+
+            if model_error:
+                print(f"[DEBUG] model_error={model_error}", flush=True)
 
             history.append(f"{action_str} -> reward {reward:.2f} | {obs.feedback[:60]}")
             if done:
@@ -227,7 +231,6 @@ async def run_episode(env, task: str) -> Tuple[bool, int, float, List[float]]:
     except Exception as exc:
         print(f"[DEBUG] Episode error for task={task}: {exc}", flush=True)
 
-    log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
     return success, steps_taken, score, rewards
 
 
@@ -235,8 +238,13 @@ async def main() -> None:
     tasks_to_run = [SINGLE_TASK] if SINGLE_TASK in VALID_TASKS else VALID_TASKS
 
     for task in tasks_to_run:
-        if IMAGE_NAME:
-            env = await NotificationEnv.from_docker_image(IMAGE_NAME)
+        success = False
+        steps = 0
+        score = 0.0
+        rewards: List[float] = []
+
+        if LOCAL_IMAGE_NAME:
+            env = await NotificationEnv.from_docker_image(LOCAL_IMAGE_NAME)
         else:
             env = NotificationEnv(base_url=ENV_URL)
 
@@ -247,6 +255,7 @@ async def main() -> None:
                 await env.close()
             except Exception as err:
                 print(f"[DEBUG] env.close() error: {err}", flush=True)
+            log_end(success=success, steps=steps, score=score, rewards=rewards)
 
         print(f"[DEBUG] Task={task} | Score={score:.3f} | Success={success}", flush=True)
 
