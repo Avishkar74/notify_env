@@ -227,7 +227,12 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
 
 
 async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    try:
+        client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    except Exception as exc:
+        print(f"[DEBUG] client_init_error={exc}", flush=True)
+        return
+
     tasks_to_run = [SINGLE_TASK] if SINGLE_TASK in VALID_TASKS else VALID_TASKS
 
     for task in tasks_to_run:
@@ -235,17 +240,21 @@ async def main() -> None:
         steps = 0
         score = 0.0
         rewards: List[float] = []
-
-        if LOCAL_IMAGE_NAME:
-            env = await NotificationEnv.from_docker_image(LOCAL_IMAGE_NAME)
-        else:
-            env = NotificationEnv(base_url=ENV_URL)
+        env = None
 
         try:
+            if LOCAL_IMAGE_NAME:
+                env = await NotificationEnv.from_docker_image(LOCAL_IMAGE_NAME)
+            else:
+                env = NotificationEnv(base_url=ENV_URL)
+
             success, steps, score, rewards = await run_episode(client, env, task)
+        except Exception as exc:
+            print(f"[DEBUG] main_task_error task={task}: {exc}", flush=True)
         finally:
             try:
-                await env.close()
+                if env is not None:
+                    await env.close()
             except Exception as err:
                 print(f"[DEBUG] env.close() error: {err}", flush=True)
             log_end(success=success, steps=steps, score=score, rewards=rewards)
@@ -254,4 +263,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        print(f"[DEBUG] fatal_error={exc}", flush=True)
+        print("[END] success=false steps=0 score=0.000 rewards=", flush=True)
+        sys.exit(1)
