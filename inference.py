@@ -159,7 +159,10 @@ def _heuristic_fallback(obs) -> str:
     return "delay"
 
 
-def get_llm_action(client: OpenAI, obs, history: List[str]) -> Tuple[str, Optional[str]]:
+def get_llm_action(client: Optional[OpenAI], obs, history: List[str]) -> Tuple[str, Optional[str]]:
+    if client is None:
+        return _heuristic_fallback(obs), "client_unavailable"
+
     user_prompt = build_user_prompt(obs)
 
     if history:
@@ -183,14 +186,12 @@ def get_llm_action(client: OpenAI, obs, history: List[str]) -> Tuple[str, Option
         return _heuristic_fallback(obs), str(exc)[:100]
 
 
-async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float, List[float]]:
+async def run_episode(client: Optional[OpenAI], env, task: str) -> Tuple[bool, int, float, List[float]]:
     rewards: List[float] = []
     history: List[str] = []
     steps_taken = 0
     score = 0.0
     success = False
-
-    log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
 
     try:
         result = await env.reset(task=task)
@@ -224,20 +225,26 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
         success = score >= SUCCESS_SCORE_THRESHOLD
     except Exception as exc:
         print(f"[DEBUG] Episode error for task={task}: {exc}", flush=True)
+        if steps_taken == 0:
+            log_step(
+                step=1,
+                action="delay",
+                reward=0.0,
+                done=True,
+                error=str(exc),
+            )
 
     return success, steps_taken, score, rewards
 
 
 async def main() -> None:
-    if not API_KEY:
-        print("[DEBUG] missing_api_key=API_KEY", flush=True)
-        return
-
+    client: Optional[OpenAI] = None
+    client_init_error: Optional[str] = None
     try:
         client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     except Exception as exc:
+        client_init_error = str(exc)
         print(f"[DEBUG] client_init_error={exc}", flush=True)
-        return
 
     tasks_to_run = [SINGLE_TASK] if SINGLE_TASK in VALID_TASKS else VALID_TASKS
 
@@ -247,10 +254,16 @@ async def main() -> None:
         score = 0.0
         rewards: List[float] = []
         env = None
+        log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
 
         try:
-            if LOCAL_IMAGE_NAME:
-                env = await NotificationEnv.from_docker_image(LOCAL_IMAGE_NAME)
+            if client is None:
+                err_msg = client_init_error or "missing_api_key"
+                log_step(step=1, action="delay", reward=0.0, done=True, error=err_msg)
+                continue
+
+            if IMAGE_NAME:
+                env = await NotificationEnv.from_docker_image(IMAGE_NAME)
             else:
                 env = NotificationEnv(base_url=ENV_URL)
 
