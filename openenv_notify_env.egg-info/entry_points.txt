@@ -1,0 +1,2 @@
+[console_scripts]
+server = notify_env.server.app:main
