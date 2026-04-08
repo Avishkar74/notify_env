@@ -9,6 +9,19 @@ colorTo: green
 
 OpenEnv environment for context-aware notification decisions across three tasks.
 
+## Reinforcement Learning (RL) Purpose
+
+This environment is designed to evaluate simple reinforcement learning (RL) and decision-making behaviors for a notification-handling agent. Each episode consists of a short sequence of steps (5 steps) where the agent observes notification and user-context features and selects one action from the discrete action space (`notify_now`, `silent`, `delay`, `escalate`).
+
+- The reward function is episodic and sparse: correct actions receive positive reward, partially-correct actions receive smaller reward, and wrong actions receive zero. Episodes are scored by average per-step reward.
+- This setup is suitable for training or evaluating policy-based agents, imitation learning baselines, or RL algorithms that must learn context-conditioned decision policies under partial observability.
+- For this submission baseline we use the LLM as a policy (prompt → action) and measure performance via the episode score reported by `inference.py`.
+
+Practical uses:
+- Rapid prototyping of policies for notification triage.
+- Measuring policy robustness across adversarial or context-shift scenarios.
+- Comparing LLM-based policies against learned RL policies in a reproducible benchmark.
+
 ## Tasks
 
 - `signal_clarity`: obvious signals (boss urgent, promo spam, OTP)
@@ -104,16 +117,3 @@ Notes:
 |---|---|---:|---|
 | `ollamainference.py` (`qwen2.5:7b`) | `signal_clarity` | `0.700` | Verified |
 | `inference.py` (OpenAI credentials) | all 3 tasks | pending | Awaiting API key |
-
-## Reinforcement Learning (RL) Purpose
-
-This environment is designed to evaluate simple reinforcement learning (RL) and decision-making behaviors for a notification-handling agent. Each episode consists of a short sequence of steps (5 steps) where the agent observes notification and user-context features and selects one action from the discrete action space (`notify_now`, `silent`, `delay`, `escalate`).
-
-- The reward function is episodic and sparse: correct actions receive positive reward, partially-correct actions receive smaller reward, and wrong actions receive zero. Episodes are scored by average per-step reward.
-- This setup is suitable for training or evaluating policy-based agents, imitation learning baselines, or RL algorithms that must learn context-conditioned decision policies under partial observability.
-- For this submission baseline we use the LLM as a policy (prompt → action) and measure performance via the episode score reported by `inference.py`.
-
-Practical uses:
-- Rapid prototyping of policies for notification triage.
-- Measuring policy robustness across adversarial or context-shift scenarios.
-- Comparing LLM-based policies against learned RL policies in a reproducible benchmark.
