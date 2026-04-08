@@ -19,10 +19,11 @@ except ModuleNotFoundError:
 
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("NOTIF_ENV_URL", "http://localhost:8000")
-HF_TOKEN = (
-    os.getenv("HF_TOKEN")
+# Prefer validator-provided API_KEY so calls are routed via LiteLLM proxy.
+API_KEY = (
+    os.getenv("API_KEY")
+    or os.getenv("HF_TOKEN")
     or os.getenv("OPENAI_API_KEY")
-    or os.getenv("API_KEY")
 )
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
@@ -227,8 +228,12 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
 
 
 async def main() -> None:
+    if not API_KEY:
+        print("[DEBUG] missing_api_key=API_KEY", flush=True)
+        return
+
     try:
-        client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     except Exception as exc:
         print(f"[DEBUG] client_init_error={exc}", flush=True)
         return
