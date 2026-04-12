@@ -34,6 +34,7 @@ class NotificationEnv(
                 step_number=obs_data.get("step_number", 0),
                 task=obs_data.get("task", ""),
                 feedback=obs_data.get("feedback", ""),
+                time_of_day=obs_data.get("time_of_day", "afternoon"),
             ),
             reward=payload.get("reward"),
             done=payload.get("done", False),

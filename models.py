@@ -26,6 +26,7 @@ class NotificationObservation(Observation):
     step_number: int
     task: str
     feedback: str
+    time_of_day: str = "afternoon"
 
 
 class NotificationState(State):

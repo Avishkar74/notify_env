@@ -1,4 +1,4 @@
-import uuid
+﻿import uuid
 from typing import Dict, List, Optional, Tuple
 
 from openenv.core.env_server.interfaces import Environment
@@ -15,7 +15,7 @@ TRUST_DECREASE = 0.20
 
 
 class NotificationEnvironment(Environment):
-    """AI Notification Gatekeeper environment with 3 tasks and 5-step episodes."""
+    """AI Notification Gatekeeper environment with deterministic episode sizing."""
 
     SUPPORTS_CONCURRENT_SESSIONS = True
     EPISODE_LENGTH = 5
@@ -38,7 +38,11 @@ class NotificationEnvironment(Environment):
         **kwargs,
     ) -> NotificationObservation:
         self._task = task if task in VALID_TASKS else "signal_clarity"
-        self._scenarios = TASK_SCENARIOS[self._task]
+        pool = TASK_SCENARIOS[self._task]
+        if not pool:
+            raise ValueError(f"No scenarios configured for task '{self._task}'")
+        # Use the full scenario catalog for the task in each episode.
+        self._scenarios = list(pool)
 
         self._current_step = 0
         self._total_reward = 0.0
@@ -62,21 +66,12 @@ class NotificationEnvironment(Environment):
         initial_trust = self._get_initial_trust(scenario["sender_history"])
         self._sender_trust[sender] = initial_trust
 
-        return NotificationObservation(
-            done=False,
-            reward=None,
-            app=scenario["app"],
-            category=scenario["category"],
-            sender_type=scenario["sender_type"],
-            urgency_hint=scenario["urgency_hint"],
-            message_frequency=scenario["message_frequency"],
-            content_keywords=scenario["content_keywords"],
-            user_state=scenario["user_state"],
-            active_tasks=scenario["active_tasks"],
-            sender_history=scenario["sender_history"],
-            sender_trust=initial_trust,
+        return self._build_obs(
+            scenario=scenario,
+            trust=initial_trust,
             step_number=1,
-            task=self._task,
+            reward=None,
+            done=False,
             feedback="",
         )
 
@@ -86,7 +81,6 @@ class NotificationEnvironment(Environment):
         timeout_s: Optional[float] = None,
         **kwargs,
     ) -> NotificationObservation:
-        # Guard against direct /step calls before /reset in stateless HTTP usage.
         if not self._scenarios or self._current_step >= len(self._scenarios):
             self.reset(task=self._task)
 
@@ -104,9 +98,10 @@ class NotificationEnvironment(Environment):
         self._importance_history.append(current_scenario["importance"])
         self._current_step += 1
 
-        done = self._current_step >= self.EPISODE_LENGTH
+        done = self._current_step >= len(self._scenarios)
+        episode_len = len(self._scenarios) if self._scenarios else 1
+        episode_score = self._total_reward / episode_len
 
-        episode_score = self._total_reward / self.EPISODE_LENGTH
         self._state = NotificationState(
             episode_id=self._state.episode_id,
             step_count=self._state.step_count,
@@ -134,10 +129,11 @@ class NotificationEnvironment(Environment):
                 sender_trust=0.0,
                 step_number=self._current_step,
                 task=self._task,
+                time_of_day="",
                 feedback=(
                     f"{feedback} | Episode complete. "
                     f"Score: {episode_score:.2f} "
-                    f"({self._total_reward:.1f}/{self.EPISODE_LENGTH:.1f})"
+                    f"({self._total_reward:.1f}/{episode_len:.1f})"
                 ),
             )
 
@@ -149,27 +145,46 @@ class NotificationEnvironment(Environment):
             )
         next_trust = self._sender_trust[next_sender]
 
-        return NotificationObservation(
-            done=False,
-            reward=reward,
-            app=next_scenario["app"],
-            category=next_scenario["category"],
-            sender_type=next_scenario["sender_type"],
-            urgency_hint=next_scenario["urgency_hint"],
-            message_frequency=next_scenario["message_frequency"],
-            content_keywords=next_scenario["content_keywords"],
-            user_state=next_scenario["user_state"],
-            active_tasks=next_scenario["active_tasks"],
-            sender_history=next_scenario["sender_history"],
-            sender_trust=next_trust,
+        return self._build_obs(
+            scenario=next_scenario,
+            trust=next_trust,
             step_number=self._current_step + 1,
-            task=self._task,
+            reward=reward,
+            done=False,
             feedback=feedback,
         )
 
     @property
     def state(self) -> NotificationState:
         return self._state
+
+    def _build_obs(
+        self,
+        scenario: dict,
+        trust: float,
+        step_number: int,
+        reward,
+        done: bool,
+        feedback: str,
+    ) -> NotificationObservation:
+        return NotificationObservation(
+            done=done,
+            reward=reward,
+            app=scenario["app"],
+            category=scenario["category"],
+            sender_type=scenario["sender_type"],
+            urgency_hint=scenario["urgency_hint"],
+            message_frequency=scenario["message_frequency"],
+            content_keywords=scenario["content_keywords"],
+            user_state=scenario["user_state"],
+            active_tasks=scenario["active_tasks"],
+            sender_history=scenario["sender_history"],
+            sender_trust=trust,
+            step_number=step_number,
+            task=self._task,
+            time_of_day=scenario.get("time_of_day", "afternoon"),
+            feedback=feedback,
+        )
 
     def _compute_reward(self, decision: str, scenario: dict) -> Tuple[float, str]:
         expected = scenario["expected_action"]
@@ -202,8 +217,11 @@ class NotificationEnvironment(Environment):
             self._sender_trust[sender] = max(0.0, current_trust - TRUST_DECREASE)
         elif decision == "escalate" and importance == "low" and reward == REWARD_WRONG:
             self._sender_trust[sender] = max(0.0, current_trust - TRUST_DECREASE * 0.5)
+        elif decision == "notify_now" and importance in ("urgent", "high") and reward == REWARD_PERFECT:
+            self._sender_trust[sender] = min(1.0, current_trust + TRUST_INCREASE * 0.5)
 
-    def _get_initial_trust(self, sender_history: str) -> float:
+    @staticmethod
+    def _get_initial_trust(sender_history: str) -> float:
         trust_map = {
             "reliable": 0.85,
             "responsive": 0.70,

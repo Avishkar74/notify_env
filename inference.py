@@ -28,14 +28,14 @@ BENCHMARK = "notify_env"
 SINGLE_TASK = os.getenv("NOTIF_TASK")
 
 EPISODE_LENGTH = 5
-MAX_TOKENS = 20
+MAX_TOKENS = 50   # slightly larger to allow one-line reasoning before the action word
 TEMPERATURE = 0.1
 SUCCESS_SCORE_THRESHOLD = 0.4
 SCORE_EPSILON = 0.001
+MAX_EPISODE_STEPS = int(os.getenv("MAX_EPISODE_STEPS", "200"))
 
 
 def normalize_score(score: float) -> float:
-    # Validator requires strictly 0 < score < 1 for every task.
     return min(max(score, SCORE_EPSILON), 1.0 - SCORE_EPSILON)
 
 
@@ -62,32 +62,60 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 
 
 def debug_log(message: str) -> None:
-    # Keep validator parsing stable: debug goes to stderr, structured blocks go to stdout.
     print(message, file=sys.stderr, flush=True)
 
 
+# ── Improved system prompt ────────────────────────────────────────────────────
 SYSTEM_PROMPT = textwrap.dedent(
     """
-You are an AI Notification Gatekeeper.
+You are an AI Notification Gatekeeper for a smartphone.
 
-You receive information about a smartphone notification and the user's current
-context. Your job is to decide how to handle it.
+Your job: read a notification + the user's current context, then output EXACTLY
+one action word — nothing else.
 
-AVAILABLE ACTIONS (output EXACTLY one, nothing else):
-  notify_now
-  silent
-  delay
-  escalate
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  notify_now  → Show immediately (time-sensitive or user is free)
+  silent      → Suppress completely (spam, sleep, deep focus + promo)
+  delay       → Queue for later (non-urgent, user is busy)
+  escalate    → Strong alert — break through everything (genuine emergency)
 
-CRITICAL OVERRIDES:
-  - sleeping + non-urgent = always silent
-  - deep_focus + promotional = always silent
-  - active_tasks contains "ordered_food" + delivery notification = notify_now
-  - sender_history = spammy + trivial content_keywords = silent
-  - genuine emergency keywords (hospital, emergency, fire) override spam history
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DECISION RULES  (highest priority first)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. EMERGENCY OVERRIDE — keywords: hospital, emergency, fire, accident, injured
+   → escalate  (overrides sleeping, spam history, deep_focus, everything)
 
-OUTPUT FORMAT:
-Respond with ONLY the action word.
+2. SLEEPING
+   • Non-emergency → silent
+   • Unknown sender + urgent claim → delay  (not escalate)
+
+3. DEEP FOCUS
+   • promotional / social / entertainment → silent
+   • Calendar/meeting reminder → notify_now  (missing a meeting is worse)
+   • Boss/urgent/high-importance → escalate or notify_now
+
+4. ACTIVE TASK MATCH
+   • ordered_food + delivery notification → notify_now
+   • booked_cab + cab-arriving notification → notify_now
+   • watching_ipl + cricket score → notify_now
+   • in_meeting + non-urgent colleague → delay
+
+5. SENDER HISTORY
+   • spammy + trivial keywords → silent  (even if urgency_hint is high)
+   • spammy + emergency keywords → escalate  (rule #1 takes precedence)
+   • reliable + urgency_hint > 0.85 → at least notify_now
+
+6. FINANCIAL / OTP TRANSACTIONAL → notify_now  (always time-critical)
+
+7. PROMOTIONAL + no matching active task → silent or delay
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Respond with ONLY the action word on a single line.
+Do NOT add punctuation, explanation, or any other text.
 """
 ).strip()
 
@@ -95,38 +123,41 @@ Respond with ONLY the action word.
 def build_user_prompt(obs) -> str:
     keywords_str = ", ".join(obs.content_keywords) if obs.content_keywords else "none"
     tasks_str = ", ".join(obs.active_tasks) if obs.active_tasks else "none"
+    time_of_day = getattr(obs, "time_of_day", "unknown")
 
     return textwrap.dedent(
         f"""
 NOTIFICATION:
-  App: {obs.app}
-  Category: {obs.category}
-  Sender type: {obs.sender_type}
-  Urgency hint: {obs.urgency_hint:.2f}
-  Messages from sender in last hour: {obs.message_frequency}
-  Content keywords: {keywords_str}
+  App:                    {obs.app}
+  Category:               {obs.category}
+  Sender type:            {obs.sender_type}
+  Urgency hint:           {obs.urgency_hint:.2f}
+  Messages (last hour):   {obs.message_frequency}
+  Content keywords:       {keywords_str}
 
 USER CONTEXT:
-  Current state: {obs.user_state}
-  Active tasks: {tasks_str}
-  Sender history: {obs.sender_history}
-  Sender trust score: {obs.sender_trust:.2f}
+  State:                  {obs.user_state}
+  Time of day:            {time_of_day}
+  Active tasks:           {tasks_str}
+  Sender history:         {obs.sender_history}
+  Sender trust score:     {obs.sender_trust:.2f}
 
-PREVIOUS STEP FEEDBACK: {obs.feedback if obs.feedback else "First step - no previous feedback"}
-EPISODE STEP: {obs.step_number} / 5
+FEEDBACK FROM LAST STEP: {obs.feedback if obs.feedback else "First step — no previous feedback"}
+EPISODE STEP: {obs.step_number}
 
-What is your decision?
-"""
+Decision:"""
     ).strip()
 
 
 def parse_action(raw: str) -> str:
+    """Extract the action word from model output, tolerating minor noise."""
     raw = raw.strip().lower()
     valid = ["notify_now", "silent", "delay", "escalate"]
 
     if raw in valid:
         return raw
 
+    # First valid token found in the response wins
     for action in valid:
         if action in raw:
             return action
@@ -142,25 +173,58 @@ def parse_action(raw: str) -> str:
 
 
 def _heuristic_fallback(obs) -> str:
-    if obs.user_state == "sleeping":
-        if "emergency" in obs.content_keywords or "hospital" in obs.content_keywords:
-            return "escalate"
-        return "silent"
+    """
+    Rule-based fallback used when the LLM call fails.
+    Mirrors the priority order from SYSTEM_PROMPT so scores stay consistent.
+    """
+    emergency_kw = {"hospital", "emergency", "fire", "accident", "injured"}
+    keywords = set(k.lower() for k in obs.content_keywords)
 
-    if obs.category == "promotional" or obs.sender_history == "spammy":
-        if obs.urgency_hint < 0.8:
-            return "silent"
-
-    if obs.sender_type == "boss" and obs.urgency_hint > 0.8:
+    # Rule 1 — emergency override
+    if keywords & emergency_kw:
         return "escalate"
 
+    # Rule 2 — sleeping
+    if obs.user_state == "sleeping":
+        if obs.sender_history == "unknown" and obs.urgency_hint >= 0.85:
+            return "delay"
+        return "silent"
+
+    # Rule 3 — deep focus
+    if obs.user_state == "deep_focus":
+        if obs.category in ("promotional", "social", "entertainment"):
+            return "silent"
+        if obs.category == "reminder":
+            return "notify_now"
+        if obs.sender_type == "boss" and obs.urgency_hint >= 0.85:
+            return "escalate"
+        if obs.urgency_hint < 0.6:
+            return "silent"
+
+    # Rule 4 — active task match
+    if "ordered_food" in obs.active_tasks and (
+        "delivery" in keywords or "arriving" in keywords
+    ):
+        return "notify_now"
+    if "booked_cab" in obs.active_tasks and (
+        "arriving" in keywords or "driver" in keywords
+    ):
+        return "notify_now"
+    if "in_meeting" in obs.active_tasks and obs.urgency_hint < 0.75:
+        return "delay"
+
+    # Rule 5 — sender history
+    if obs.sender_history == "spammy" and obs.urgency_hint < 0.8:
+        return "silent"
+    if obs.sender_type == "boss" and obs.urgency_hint >= 0.85:
+        return "escalate"
+
+    # Rule 6 — financial / OTP
     if obs.category == "transactional":
         return "notify_now"
 
-    if "ordered_food" in obs.active_tasks and "delivery" in obs.content_keywords:
-        return "notify_now"
-
-    if obs.user_state == "deep_focus" and obs.urgency_hint < 0.6:
+    # Rule 7 — promotional
+    if obs.category == "promotional":
         return "silent"
 
     return "delay"
@@ -187,11 +251,11 @@ def get_llm_action(client: OpenAI, obs, history: List[str]) -> Tuple[str, Option
         raw_text = (completion.choices[0].message.content or "").strip()
         return parse_action(raw_text), None
     except Exception as exc:
-        return _heuristic_fallback(obs), str(exc)[:100]
+        return _heuristic_fallback(obs), str(exc)[:120]
 
 
 def warmup_proxy_call(client: OpenAI) -> None:
-    """Make one minimal call so validator can observe proxy traffic even if env fails early."""
+    """One minimal call so the validator can observe proxy traffic on startup."""
     try:
         client.chat.completions.create(
             model=MODEL_NAME,
@@ -215,7 +279,7 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
         result = await env.reset(task=task)
         obs = result.observation
 
-        for step in range(1, EPISODE_LENGTH + 1):
+        for step in range(1, MAX_EPISODE_STEPS + 1):
             if result.done:
                 break
 
@@ -234,37 +298,29 @@ async def run_episode(client: OpenAI, env, task: str) -> Tuple[bool, int, float,
             if llm_error:
                 debug_log(f"[DEBUG] model_error={llm_error}")
 
-            history.append(f"{action_str} -> reward {reward:.2f} | {obs.feedback[:60]}")
+            history.append(f"{action_str} -> reward {reward:.2f} | {obs.feedback[:80]}")
             if done:
                 break
 
-        score = sum(rewards) / EPISODE_LENGTH if EPISODE_LENGTH > 0 else 0.0
+        denominator = len(rewards) if rewards else 1
+        score = sum(rewards) / denominator
         score = normalize_score(score)
         success = score >= SUCCESS_SCORE_THRESHOLD
     except Exception as exc:
         debug_log(f"[DEBUG] episode_error task={task}: {exc}")
         if steps_taken == 0:
-            log_step(
-                step=1,
-                action="delay",
-                reward=0.0,
-                done=True,
-                error=str(exc),
-            )
+            log_step(step=1, action="delay", reward=0.0, done=True, error=str(exc))
 
     return success, steps_taken, score, rewards
 
 
 async def main() -> None:
-    client: OpenAI
     try:
-        # Validator requires explicit use of injected proxy vars.
         client = OpenAI(
             base_url=os.environ["API_BASE_URL"],
             api_key=os.environ["API_KEY"],
         )
     except KeyError:
-        # Local fallback for manual testing outside validator.
         if not API_KEY:
             raise RuntimeError("Missing API_KEY for OpenAI client initialization")
         client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
