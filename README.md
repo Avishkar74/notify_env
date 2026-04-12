@@ -7,59 +7,96 @@ colorTo: green
 
 # AI Notification Gatekeeper
 
-OpenEnv environment for context-aware notification decisions across three tasks.
+An OpenEnv benchmark where an agent decides how to handle smartphone notifications under changing user context.
 
-## Reinforcement Learning (RL) Purpose
+## Environment Description And Motivation
 
-This environment is designed to evaluate simple reinforcement learning (RL) and decision-making behaviors for a notification-handling agent. Each episode consists of a short sequence of steps (5 steps) where the agent observes notification and user-context features and selects one action from the discrete action space (`notify_now`, `silent`, `delay`, `escalate`).
+Modern users receive mixed notifications: urgent work pings, transactional OTPs, social chats, and adversarial spam. A useful notification assistant must do more than classify message type; it must reason over context (user state, active tasks, sender trust, urgency cues) and choose a suitable action.
 
-- The reward function is episodic and sparse: correct actions receive positive reward, partially-correct actions receive smaller reward, and wrong actions receive zero. Episodes are scored by average per-step reward.
-- This setup is suitable for training or evaluating policy-based agents, imitation learning baselines, or RL algorithms that must learn context-conditioned decision policies under partial observability.
-- For this submission baseline we use the LLM as a policy (prompt → action) and measure performance via the episode score reported by `inference.py`.
+This environment is designed to benchmark that behavior using scenario-driven episodes across three difficulty tiers.
 
-Practical uses:
-- Rapid prototyping of policies for notification triage.
-- Measuring policy robustness across adversarial or context-shift scenarios.
-- Comparing LLM-based policies against learned RL policies in a reproducible benchmark.
-
-## Tasks
-
-- `signal_clarity`: obvious signals (boss urgent, promo spam, OTP)
-- `context_aware`: same notification can require different actions by context
-- `adversarial_signals`: fake urgency, spam-then-real emergencies, escalation chains
+Core goals:
+- Measure context-aware decision quality, not just keyword matching.
+- Test robustness to adversarial/fake urgency patterns.
+- Provide a reproducible benchmark for RL, rule-based, and LLM policies.
 
 ## Action Space
 
-- `notify_now`
-- `silent`
-- `delay`
-- `escalate`
+Discrete action space with 4 actions:
 
-## Observation Fields
+- `notify_now`: show immediately.
+- `silent`: suppress notification.
+- `delay`: defer for later.
+- `escalate`: high-priority interrupt.
 
-- `app`, `category`, `sender_type`, `urgency_hint`, `message_frequency`, `content_keywords`
-- `user_state`, `active_tasks`, `sender_history`, `sender_trust`
-- `step_number`, `task`, `feedback`
+## Observation Space
 
-## Reward
+Each step returns a structured observation with the following fields:
 
-Per-step:
-- `1.0` correct action
-- `0.5` acceptable action
-- `0.0` wrong action
+- `app: str`
+- `category: str`
+- `sender_type: str`
+- `urgency_hint: float` in `[0, 1]`
+- `message_frequency: int`
+- `content_keywords: list[str]`
+- `user_state: str`
+- `time_of_day: str`
+- `active_tasks: list[str]`
+- `sender_history: str`
+- `sender_trust: float` in `[0, 1]`
+- `step_number: int`
+- `task: str`
+- `feedback: str`
+- `reward: float | None`
+- `done: bool`
 
-Episode score:
+## Reward And Episode Scoring
 
-`score = total_reward / 5.0`
+Per-step reward:
+- `1.0` for expected action
+- `0.5` for acceptable but non-optimal action
+- `0.0` for wrong action
 
-## Local Run
+Episode score is average reward over actual episode steps:
+
+`episode_score = total_reward / num_steps`
+
+## Tasks And Expected Difficulty
+
+- `signal_clarity` (easy): high-signal cases (clear urgent, clear spam, clear transactional).
+- `context_aware` (medium): same app/category can require different actions based on user context.
+- `adversarial_signals` (hard): fake urgency, scam patterns, and spam-to-real-emergency transitions.
+
+Current scenario counts:
+- `signal_clarity`: 25
+- `context_aware`: 25
+- `adversarial_signals`: 25
+
+## Setup
+
+### 1. Create environment and install
 
 ```bash
+python -m venv .venv
+. .venv/bin/activate
 pip install -e .
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+```
+
+### 2. Run server locally
+
+```bash
 uvicorn notify_env.server.app:app --host 0.0.0.0 --port 7860 --reload
 ```
 
-## Quick API Check
+### 3. Quick API check
 
 ```bash
 curl http://localhost:7860/health
@@ -67,21 +104,17 @@ curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d 
 curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d '{"decision":"notify_now"}'
 ```
 
-## Baseline Script
+## Usage
 
-`inference.py` is included at project root and emits:
+### OpenAI-compatible runner
 
-- `[START]`
-- `[STEP]`
-- `[END]`
+`inference.py` runs policy inference through an OpenAI-compatible endpoint.
 
-Configure environment variables before running:
-
-- `OPENAI_API_KEY` (preferred)
-- `HF_TOKEN` (fallback)
-- `MODEL_NAME`
-- `API_BASE_URL`
-- `NOTIF_ENV_URL`
+Required env vars:
+- `API_KEY`
+- `API_BASE_URL` (default: `https://router.huggingface.co/v1`)
+- `MODEL_NAME` (default: `Qwen/Qwen2.5-72B-Instruct`)
+- `NOTIF_ENV_URL` (local or deployed environment URL)
 
 Run:
 
@@ -89,31 +122,49 @@ Run:
 python inference.py
 ```
 
-## Ollama Test Runner
+### Ollama runner
 
-`ollamainference.py` is included for local inference-flow validation without OpenAI credentials.
+`ollamainference.py` runs local model inference through Ollama.
 
-Defaults:
-- `OLLAMA_URL=http://localhost:11434`
-- `OLLAMA_MODEL=qwen2.5:7b`
+Common vars:
+- `OLLAMA_URL` (default: `http://localhost:11434`)
+- `OLLAMA_MODEL` (default: `qwen2.5:7b`)
+- `NOTIF_ENV_URL`
+- `NOTIF_TASK` (optional: run a single task)
 
-Run with one task:
+Run:
 
 ```bash
-OLLAMA_URL=http://localhost:11434 \
-OLLAMA_MODEL=qwen2.5:7b \
-NOTIF_ENV_URL=https://Avishkar-00-notify-env.hf.space \
-NOTIF_TASK=signal_clarity \
 python ollamainference.py
 ```
 
+Both runners emit structured logs:
+- `[START]`
+- `[STEP]`
+- `[END]`
+
+## Baseline Scores
+
+Reference deterministic-policy baselines (computed on current 25x3 scenario set):
+
+| Policy | signal_clarity | context_aware | adversarial_signals |
+|---|---:|---:|---:|
+| always_silent | 0.48 | 0.22 | 0.44 |
+| always_delay | 0.12 | 0.34 | 0.34 |
+| always_notify_now | 0.42 | 0.58 | 0.18 |
+| always_escalate | 0.14 | 0.08 | 0.24 |
+
+Observed model-policy baseline from `ollamainference.py` (`qwen2.5:7b`, 25-step episodes):
+
+| Runner | signal_clarity | context_aware | adversarial_signals | mean |
+|---|---:|---:|---:|---:|
+| ollamainference.py (`qwen2.5:7b`) | 0.84 | 0.58 | 0.64 | 0.687 |
+
 Notes:
-- This validates prompting, action parsing, episode loop, and `[START]/[STEP]/[END]` logging.
-- It does not replace final OpenAI baseline evidence for submission scoring.
+- `warmup_call_error=timed out` can happen if Ollama takes too long to answer the short warmup request.
+- This does not invalidate the run when the task loops execute and emit complete `[START]`/`[STEP]`/`[END]` blocks.
 
-## Baseline Results Snapshot
-
-| Runner | Task | Score | Status |
-|---|---|---:|---|
-| `ollamainference.py` (`qwen2.5:7b`) | `signal_clarity` | `0.700` | Verified |
-| `inference.py` (OpenAI credentials) | all 3 tasks | pending | Awaiting API key |
+Interpretation:
+- `signal_clarity` rewards suppression of obvious spam and escalation of clear emergencies.
+- `context_aware` favors timely contextual actions (`notify_now` performs relatively better here).
+- `adversarial_signals` penalizes naive always-on escalation/notification behavior.
